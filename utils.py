@@ -1,16 +1,14 @@
 # utils.py
-# Helpers do WhatsApp Analyzer para uso no Vercel (serverless)
-# Comentado e compatível com leitura em /tmp.
+# Helpers do WhatsApp Analyzer para uso em Vercel (serverless)
+# Compatível com leitura de arquivos em memória ou disco
+# Comentado e seguro para evitar crashes
 
 import re
 from datetime import datetime
 from rapidfuzz import fuzz
 
 # --------- Padrões de data do WhatsApp ---------
-# Exemplo comum: "04/12/2023 11:12 - Fulano: mensagem"
 PATTERN1 = re.compile(r'^(\d{1,2}/\d{1,2}/\d{2,4})\s+(\d{1,2}:\d{2})(?:\s*-\s*)(.*?):\s*(.*)$')
-
-# Outro formato: "01/12/2024, 14:22 - Fulano: mensagem"
 PATTERN2 = re.compile(r'^(\d{1,2}/\d{1,2}/\d{2,4}),\s*(\d{1,2}:\d{2})\s*-\s*(.*?):\s*(.*)$')
 
 
@@ -25,21 +23,25 @@ def _try_parse_date(date_str):
         try:
             return datetime.strptime(date_str, fmt)
         except:
-            pass
+            continue
     return None
 
 
 # ----------------- Parse do TXT -----------------
-def parse_whatsapp_txt(path):
+def parse_whatsapp_txt(file_or_path):
     """
-    Lê arquivo TXT (estilo export WhatsApp) e separa mensagens.
-    Retorno: lista de dicts:
-      {'id', 'date', 'author', 'text'}
+    Lê arquivo TXT (WhatsApp) e separa mensagens.
+    file_or_path: pode ser path string ou arquivo-like (StringIO)
+    Retorno: lista de dicts {'id', 'date', 'author', 'text'}
     """
-    messages = []
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.read().splitlines()
+    if isinstance(file_or_path, str):
+        with open(file_or_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.read().splitlines()
+    else:
+        lines = file_or_path.read().splitlines()
+        file_or_path.seek(0)
 
+    messages = []
     buffer = None
     msg_id = 0
 
@@ -96,7 +98,7 @@ def analyze_keywords(messages, keywords, fuzzy_threshold=0.0):
     for kw in keywords:
         matches = []
 
-        # regex exato para frase/palavra (sem \b)
+        # regex exato para frase/palavra (escapando caracteres especiais)
         exact_pattern = re.compile(re.escape(kw), re.IGNORECASE)
 
         for msg in messages:
@@ -114,15 +116,19 @@ def analyze_keywords(messages, keywords, fuzzy_threshold=0.0):
             else:
                 # fuzzy opcional
                 if fuzzy_threshold > 0:
-                    score = fuzz.partial_ratio(kw.lower(), text.lower())
-                    if score >= fuzzy_threshold * 100:
-                        matches.append({
-                            "id": msg["id"],
-                            "date": msg["date"],
-                            "author": msg["author"],
-                            "text_excerpt": excerpt(text, kw),
-                            "score": score
-                        })
+                    try:
+                        score = fuzz.partial_ratio(kw.lower(), text.lower())
+                        if score >= fuzzy_threshold * 100:
+                            matches.append({
+                                "id": msg["id"],
+                                "date": msg["date"],
+                                "author": msg["author"],
+                                "text_excerpt": excerpt(text, kw),
+                                "score": score
+                            })
+                    except Exception:
+                        # Ignorar problemas de unicode ou strings inválidas
+                        continue
 
         result.append({
             "word": kw,
@@ -140,12 +146,15 @@ def highlight_lines(messages, keywords):
         txt = msg["text"]
 
         for kw in keywords:
-            txt = re.sub(
-                re.escape(kw),
-                lambda x: f"<mark>{x.group(0)}</mark>",
-                txt,
-                flags=re.IGNORECASE
-            )
+            try:
+                txt = re.sub(
+                    re.escape(kw),
+                    lambda x: f"<mark>{x.group(0)}</mark>",
+                    txt,
+                    flags=re.IGNORECASE
+                )
+            except Exception:
+                continue
 
         txt = txt.replace("\n", "<br>")
 

@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Relatório</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+<div class="container">
+  <h1>Relatório</h1>
+
+  <div class="controls">
+    <button id="exportCsv">Exportar CSV</button>
+    <button id="exportExcel">Exportar Excel</button>
+    <a href="/">Nova análise</a>
+  </div>
+
+  <h2>Resumo</h2>
+  {% for item in report %}
+    <div class="card">
+      <h3>{{ item.word }} <span class="badge">{{ item.count }}</span></h3>
+      <ul>
+      {% for m in item.matches %}
+        <li>
+          <a href="#loc{{ m.id }}">{{ m.date }}</a> — {{ m.author }} — <em>{{ m.text_excerpt }}</em>
+        </li>
+      {% endfor %}
+      </ul>
+    </div>
+  {% endfor %}
+
+  <h2>Texto Analisado</h2>
+  <div class="textarea">
+    {% for line in text_lines %}
+      <div class="line" id="loc{{ line.id }}">
+        <small>{{ line.date }} {{ line.author }}</small>
+        <div class="message">{{ line.html|safe }}</div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+
+<script>
+const data = {{ chart_data|tojson }};
+
+    // payload vindo do Flask
+    const payload = { report: {{ report|tojson }} };
+
+    document.getElementById("exportCsv").addEventListener("click", () => {
+        fetch("/export/csv", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.blob())
+        .then(blob => {
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "relatorio.csv";
+            a.click();
+        });
+    });
+
+    document.getElementById("exportExcel").addEventListener("click", () => {
+        fetch("/export/excel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.blob())
+        .then(blob => {
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "relatorio.xlsx";
+            a.click();
+        });
+    });
+</script>
+
+</body>
+</html>

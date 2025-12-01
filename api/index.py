@@ -1,95 +1,139 @@
 # api/index.py
-# Versão serverless do seu Flask para Vercel.
-# IMPORTANTE: usar render_template_string apontando para leitura manual dos templates.
+# Versão serverless pura para Vercel (sem Flask)
+# Mantém suas rotas: /, /analyze, /export/csv, /export/excel
+# Processamento de arquivos em memória e templates via render_template_string
 
-from flask import Flask, request, send_file, jsonify
-from flask import render_template_string
+import json
 import os
 import pandas as pd
-from io import BytesIO
+from io import BytesIO, StringIO
 from utils import parse_whatsapp_txt, analyze_keywords, highlight_lines
+from flask import render_template_string  # só para renderizar templates em string
 
-app = Flask(__name__)
+# --------------------------
+# Helpers
+# --------------------------
 
-# --------------------------------------------------------------------
-# Helpers para carregar templates (Vercel não suporta render_template)
-# --------------------------------------------------------------------
+BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
+
 def load_template(name):
-    path = os.path.join(os.path.dirname(__file__), "..", "templates", name)
+    """Carrega template HTML manualmente (Vercel não suporta render_template)."""
+    path = os.path.join(BASE_DIR, "templates", name)
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
-# --------------------------------------------------------------------
-# Rotas
-# --------------------------------------------------------------------
+def json_response(data, status=200):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps(data, default=str)
+    }
 
-@app.route("/", methods=["GET"])
-def form():
-    html = load_template("index.html")
-    return render_template_string(html)
+def html_response(html, status=200):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "text/html"},
+        "body": html
+    }
 
-@app.route("/analyze", methods=["POST"])
-def analyze():
-    file = request.files.get("file")
-    keywords_raw = request.form.get("keywords", "")
-    fuzzy = float(request.form.get("fuzzy_threshold", "0") or 0)
+def file_response(buffer, mimetype, filename):
+    return {
+        "statusCode": 200,
+        "headers": {
+            "Content-Type": mimetype,
+            "Content-Disposition": f"attachment; filename={filename}"
+        },
+        "body": buffer.getvalue(),
+        "isBase64Encoded": True  # Vercel exige base64 para arquivos binários
+    }
 
-    if not file:
-        return "Arquivo ausente", 400
+# --------------------------
+# Rotas serverless
+# --------------------------
 
-    # lê o txt sem salvar no disco (Vercel não deixa)
-    text_bytes = file.read().decode("utf-8", errors="ignore")
-    temp_path = "/tmp/temp_whatsapp.txt"
-    with open(temp_path, "w", encoding="utf-8") as f:
-        f.write(text_bytes)
+def handler(request):
+    """
+    Função handler principal para Vercel.
+    request: objeto compatível com Flask-like (request.form, request.files)
+    """
 
-    messages = parse_whatsapp_txt(temp_path)
-    keywords = [k.strip() for k in keywords_raw.splitlines() if k.strip()]
+    try:
+        path = request.path
+        method = request.method.upper()
 
-    report = analyze_keywords(messages, keywords, fuzzy_threshold=fuzzy)
-    highlighted = highlight_lines(messages, keywords)
+        # ----------------------
+        # Página inicial "/"
+        # ----------------------
+        if path == "/" and method == "GET":
+            html = load_template("index.html")
+            return html_response(render_template_string(html))
 
-    # gerar gráfico
-    rows = []
-    for item in report:
-        for m in item['matches']:
-            dt = m['date'].date() if m['date'] else None
-            rows.append({'date': str(dt) if dt else 'unknown'})
-    df = pd.DataFrame(rows)
-    chart_df = df.groupby('date').size().reset_index(name='count') if not df.empty else pd.DataFrame({'date':[],'count':[]})
+        # ----------------------
+        # Rota /analyze
+        # ----------------------
+        elif path == "/analyze" and method == "POST":
+            file = request.files.get("file")
+            keywords_raw = request.form.get("keywords", "")
+            fuzzy = float(request.form.get("fuzzy_threshold", "0") or 0)
 
-    html = load_template("report.html")
+            if not file:
+                return json_response({"error": "Arquivo ausente"}, 400)
 
-    return render_template_string(
-        html,
-        report=report,
-        text_lines=highlighted,
-        chart_data=chart_df.to_dict("list")
-    )
+            # Processa arquivo em memória
+            text_bytes = file.read().decode("utf-8", errors="ignore")
+            messages = parse_whatsapp_txt(StringIO(text_bytes))
+            keywords = [k.strip() for k in keywords_raw.splitlines() if k.strip()]
 
-@app.route("/export/csv", methods=["POST"])
-def export_csv():
-    data = request.get_json()
-    df = pd.json_normalize(data["report"])
-    buf = BytesIO()
-    df.to_csv(buf, index=False, encoding="utf-8-sig")
-    buf.seek(0)
-    return send_file(buf, mimetype="text/csv", as_attachment=True, download_name="relatorio.csv")
+            report = analyze_keywords(messages, keywords, fuzzy_threshold=fuzzy)
+            highlighted = highlight_lines(messages, keywords)
 
-@app.route("/export/excel", methods=["POST"])
-def export_excel():
-    data = request.get_json()
-    df = pd.json_normalize(data["report"])
-    buf = BytesIO()
-    df.to_excel(buf, index=False)
-    buf.seek(0)
-    return send_file(
-        buf,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        as_attachment=True,
-        download_name="relatorio.xlsx",
-    )
+            # Gerar gráfico (dados)
+            rows = []
+            for item in report:
+                for m in item['matches']:
+                    dt = m['date'].date() if m['date'] else None
+                    rows.append({'date': str(dt) if dt else 'unknown'})
+            df = pd.DataFrame(rows)
+            chart_df = df.groupby('date').size().reset_index(name='count') if not df.empty else pd.DataFrame({'date':[],'count':[]})
 
-# Vercel: expoe o app
-def handler(event, context):
-    return app(event, context)
+            html = load_template("report.html")
+            rendered = render_template_string(html, report=report, text_lines=highlighted, chart_data=chart_df.to_dict("list"))
+
+            return html_response(rendered)
+
+        # ----------------------
+        # Rota /export/csv
+        # ----------------------
+        elif path == "/export/csv" and method == "POST":
+            data = request.get_json()
+            if "report" not in data:
+                return json_response({"error": "Dados ausentes"}, 400)
+
+            df = pd.json_normalize(data["report"])
+            buf = BytesIO()
+            df.to_csv(buf, index=False, encoding="utf-8-sig")
+            buf.seek(0)
+
+            return file_response(buf, "text/csv", "relatorio.csv")
+
+        # ----------------------
+        # Rota /export/excel
+        # ----------------------
+        elif path == "/export/excel" and method == "POST":
+            data = request.get_json()
+            if "report" not in data:
+                return json_response({"error": "Dados ausentes"}, 400)
+
+            df = pd.json_normalize(data["report"])
+            buf = BytesIO()
+            df.to_excel(buf, index=False)
+            buf.seek(0)
+
+            return file_response(buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "relatorio.xlsx")
+
+        else:
+            return json_response({"error": "Rota não encontrada"}, 404)
+
+    except Exception as e:
+        import traceback
+        return json_response({"error": str(e), "trace": traceback.format_exc()}, 500)
